@@ -1,0 +1,49 @@
+name: WOLF X Telegram
+
+on:
+  schedule:
+    - cron: "0 * * * *"        # every hour; a queued run starts as soon as the current one ends
+  workflow_dispatch:
+    inputs:
+      send_test:
+        description: "Send a test message to Telegram"
+        default: "1"
+
+concurrency:
+  group: wolfx
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install websocket-client
+      - name: Watch Wolf X arrows
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT: ${{ secrets.TG_CHAT }}
+          SYMBOLS: ${{ vars.SYMBOLS || 'OANDA:XAUUSD,OANDA:EURUSD,OANDA:GBPUSD,OANDA:USDJPY' }}
+          TF: ${{ vars.TF || '15' }}
+          RUN_MINUTES: "350"
+          SEND_TEST: ${{ github.event.inputs.send_test }}
+        run: python wolfx_bot.py
+      - name: Keep the schedule alive (GitHub pauses schedules after 60 days without commits)
+        if: always()
+        run: |
+          git pull -q || true
+          if [ $(( $(date +%s) - $(git log -1 --format=%ct) )) -gt 864000 ]; then
+            git config user.name "wolfx-bot"
+            git config user.email "wolfx-bot@users.noreply.github.com"
+            date -u > keepalive.txt
+            git add keepalive.txt
+            git commit -m "keepalive" || true
+            git push || true
+          fi
