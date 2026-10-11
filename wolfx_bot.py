@@ -17,7 +17,8 @@ PINE_ID = "PUB;862506c546514212b9728a634dbc7152"
 WS_URL = "wss://widgetdata.tradingview.com/socket.io/websocket?from=embed"
 HEADERS = ["Origin: https://s.tradingview.com", "User-Agent: Mozilla/5.0"]
 
-TG_TOKEN = os.environ.get("TG_TOKEN", "").strip()
+_tok = re.search(r"\d{6,}:[A-Za-z0-9_-]{30,}", os.environ.get("TG_TOKEN", ""))
+TG_TOKEN = _tok.group(0) if _tok else ""
 TG_CHAT = os.environ.get("TG_CHAT", "").strip()
 SYMBOLS = [s.strip() for s in os.environ.get(
     "SYMBOLS", "OANDA:XAUUSD,OANDA:EURUSD,OANDA:GBPUSD,OANDA:USDJPY").split(",") if s.strip()]
@@ -156,15 +157,23 @@ def check_closed(sym, bi, si, start_time):
 def run_once(inputs, bi, si, deadline, syms):
     ws = websocket.create_connection(WS_URL, header=HEADERS, timeout=60)
     ws.send(enc("set_auth_token", ["widget_user_token"]))
+    retry = {}  # cs -> time to re-create the study
     for s in syms:
-        s.bars.clear(); s.study.clear()
+        s.bars.clear(); s.study.clear(); s.st_n = 1
         ws.send(enc("chart_create_session", [s.cs, ""]))
         ws.send(enc("resolve_symbol", [s.cs, "sds_sym_1", '={"symbol":"%s","adjustment":"splits"}' % s.ticker]))
         ws.send(enc("create_series", [s.cs, "sds_1", "s1", "sds_sym_1", TF, 300, ""]))
-        ws.send(enc("create_study", [s.cs, "st1", "st1", "sds_1", "Script@tv-scripting-101!", inputs]))
+        retry[s.cs] = time.time() + 2 + 6 * len(retry)  # stagger study creation
     by_cs = {s.cs: s for s in syms}
     start = time.time()
     while time.time() < deadline:
+        now = time.time()
+        for cs, at in list(retry.items()):
+            if now >= at:
+                s = by_cs[cs]
+                sid = "st%d" % s.st_n
+                ws.send(enc("create_study", [cs, sid, sid, "sds_1", "Script@tv-scripting-101!", inputs]))
+                del retry[cs]
         raw = ws.recv()
         for fr in split_frames(raw):
             if fr.startswith("~h~"):
@@ -184,10 +193,16 @@ def run_once(inputs, bi, si, deadline, syms):
                 data = p[1]
                 for row in data.get("sds_1", {}).get("s", []):
                     s.bars[row["i"]] = row["v"][:5]
-                for row in data.get("st1", {}).get("st", []):
+                for row in data.get("st%d" % s.st_n, {}).get("st", []):
                     s.study[row["i"]] = row["v"]
                 check_closed(s, bi, si, start)
-            elif m in ("study_error", "symbol_error", "series_error", "critical_error", "protocol_error"):
+            elif m == "study_error":
+                log("study error, retrying", s.ticker, json.dumps(p)[:200])
+                ws.send(enc("remove_study", [s.cs, "st%d" % s.st_n]))
+                s.st_n += 1
+                s.study.clear()
+                retry[s.cs] = time.time() + 15
+            elif m in ("symbol_error", "series_error", "critical_error", "protocol_error"):
                 log("ERROR", s.ticker, json.dumps(p)[:300])
     ws.close()
 
