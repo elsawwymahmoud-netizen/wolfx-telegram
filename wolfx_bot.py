@@ -142,7 +142,7 @@ def check_closed(sym, bi, si, start_time):
         dec = sym.decimals
         when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(b[0] + int(TF) * 60 + 3 * 3600))
         nice = {"XAUUSD": "GOLD", "NAS100USD": "NAS100", "US30USD": "US30"}.get(sym.short(), sym.short())
-        msg = "🔔 Check " + nice + " — " + TF + "m"
+        msg = ("🟢 BUY" if d == 1 else "🔴 SELL") + " — Check " + nice + " — " + TF + "m"
         log("SIGNAL", msg)
         telegram(msg)
 
