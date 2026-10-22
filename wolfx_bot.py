@@ -39,11 +39,12 @@ def telegram(text):
     if not TG_TOKEN or not TG_CHAT:
         log("TELEGRAM (not configured):", text)
         return
-    data = urllib.parse.urlencode({"chat_id": TG_CHAT, "text": text}).encode()
-    try:
-        urllib.request.urlopen("https://api.telegram.org/bot%s/sendMessage" % TG_TOKEN, data, timeout=20).read()
-    except Exception as e:
-        log("telegram error", e)
+    for chat in [c.strip() for c in TG_CHAT.split(",") if c.strip()]:
+        data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
+        try:
+            urllib.request.urlopen("https://api.telegram.org/bot%s/sendMessage" % TG_TOKEN, data, timeout=20).read()
+        except Exception as e:
+            log("telegram error", chat, e)
 
 
 def http_json(url):
@@ -140,17 +141,9 @@ def check_closed(sym, bi, si, start_time):
         tps = [entry + d * risk * r for r in RR]
         dec = sym.decimals
         when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(b[0] + int(TF) * 60 + 3 * 3600))
-        head = ("🟢 WOLF X BUY " if d == 1 else "🔴 WOLF X SELL ") + sym.short() + " (" + TF + "m)"
-        msg = "\n".join([
-            head,
-            "Entry: " + fmt(entry, dec),
-            "Invalid: " + fmt(sl, dec),
-            "TP1: " + fmt(tps[0], dec),
-            "TP2: " + fmt(tps[1], dec),
-            "TP3: " + fmt(tps[2], dec),
-            "Time: " + when + " (UTC+3)",
-        ])
-        log("SIGNAL", msg.replace("\n", " | "))
+        nice = {"XAUUSD": "GOLD", "NAS100USD": "NAS100", "US30USD": "US30"}.get(sym.short(), sym.short())
+        msg = "🔔 Check " + nice + " — " + TF + "m"
+        log("SIGNAL", msg)
         telegram(msg)
 
 
