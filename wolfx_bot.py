@@ -56,7 +56,8 @@ def load_script():
     r = http_json("https://pine-facade.tradingview.com/pine-facade/translate/%s/last" % urllib.parse.quote(PINE_ID, safe=""))
     res = r["result"]
     mi = res["metaInfo"]
-    inputs = {"text": res["ilTemplate"], "pineId": mi["scriptIdPart"], "pineVersion": mi["pine"]["version"]}
+    il = res.get("ilTemplate") or next(i["defval"] for i in mi["inputs"] if i["id"] == "text")
+    inputs = {"text": il, "pineId": mi["scriptIdPart"], "pineVersion": mi["pine"]["version"]}
     for i in mi["inputs"]:
         if i["id"] in ("text", "pineId", "pineVersion"):
             continue
