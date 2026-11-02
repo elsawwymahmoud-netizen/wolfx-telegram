@@ -36,6 +36,8 @@ jobs:
           TG_ADMIN: ${{ secrets.TG_ADMIN }}
           TV_SESSION: ${{ secrets.TV_SESSION }}
           TV_SESSION_SIGN: ${{ secrets.TV_SESSION_SIGN }}
+          TV_USER: ${{ secrets.TV_USER }}
+          TV_PASS: ${{ secrets.TV_PASS }}
           SYMBOLS: ${{ vars.SYMBOLS || 'OANDA:XAUUSD,OANDA:EURUSD,OANDA:GBPUSD,OANDA:USDJPY,OANDA:GBPJPY,OANDA:NAS100USD,OANDA:US30USD' }}
           TF: ${{ matrix.tf }}
           RUN_MINUTES: "350"
