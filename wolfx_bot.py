@@ -69,15 +69,53 @@ def http(url, cookie=None):
     return urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=30).read().decode()
 
 
+TV_USER = os.environ.get("TV_USER", "").strip()
+TV_PASS = os.environ.get("TV_PASS", "").strip()
+_cookie = {"v": ""}
+_lock = threading.Lock()
+
+
+def login_cookie():
+    """Log in with TV_USER / TV_PASS and return the session cookie string."""
+    with _lock:
+        if _cookie["v"]:
+            return _cookie["v"]
+        body = urllib.parse.urlencode({"username": TV_USER, "password": TV_PASS, "remember": "on"}).encode()
+        req = urllib.request.Request("https://www.tradingview.com/accounts/signin/", data=body, headers={
+            "User-Agent": UA, "Origin": "https://www.tradingview.com", "Referer": "https://www.tradingview.com/",
+            "X-Requested-With": "XMLHttpRequest"})
+        try:
+            resp = urllib.request.urlopen(req, timeout=30)
+            txt = resp.read().decode()[:300]
+            parts = []
+            for h in resp.headers.get_all("Set-Cookie") or []:
+                kv = h.split(";")[0]
+                if kv.startswith("sessionid=") or kv.startswith("sessionid_sign="):
+                    parts.append(kv)
+            if parts:
+                _cookie["v"] = "; ".join(parts)
+                log("TradingView login OK")
+            else:
+                admin("loginfail", "TradingView login failed: " + txt)
+        except Exception as e:
+            admin("loginerr", "TradingView login error: " + repr(e)[:150])
+        return _cookie["v"]
+
+
 def get_auth():
     """Return (ws_url, origin, auth_token)."""
+    cookie = ""
     if TV_SESSION:
         cookie = "sessionid=%s; sessionid_sign=%s" % (TV_SESSION, TV_SESSION_SIGN)
+    elif TV_USER and TV_PASS:
+        cookie = login_cookie()
+    if cookie:
         page = http("https://www.tradingview.com/chart/", cookie)
         m = re.search(r'"auth_token":"([^"]+)"', page)
         if m:
             return "wss://data.tradingview.com/socket.io/websocket?type=chart", "https://www.tradingview.com", m.group(1)
-        admin("login", "TradingView login failed — the TV_SESSION cookie is wrong or expired. Copy it again.")
+        _cookie["v"] = ""
+        admin("login", "TradingView login is not working (wrong or expired login details).")
     return ("wss://widgetdata.tradingview.com/socket.io/websocket?from=embed", "https://s.tradingview.com",
             "widget_user_token")
 
@@ -211,7 +249,7 @@ def watch(sym, inputs, bi, si, deadline):
 
 def main():
     inputs, bi, si = load_script()
-    log("Wolf X loaded. symbols:", SYMBOLS, "tf:", TF, "login:", "yes" if TV_SESSION else "no")
+    log("Wolf X loaded. symbols:", SYMBOLS, "tf:", TF, "login:", "cookie" if TV_SESSION else ("password" if TV_USER else "no"))
     if TEST:
         send(TG_ADMIN or TG_CHAT, "✅ WOLF X bot is running (" + TF + "m)")
     deadline = time.time() + RUN_SECONDS
