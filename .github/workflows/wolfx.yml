@@ -33,6 +33,9 @@ jobs:
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT: ${{ secrets.TG_CHAT }}
+          TG_ADMIN: ${{ secrets.TG_ADMIN }}
+          TV_SESSION: ${{ secrets.TV_SESSION }}
+          TV_SESSION_SIGN: ${{ secrets.TV_SESSION_SIGN }}
           SYMBOLS: ${{ vars.SYMBOLS || 'OANDA:XAUUSD,OANDA:EURUSD,OANDA:GBPUSD,OANDA:USDJPY,OANDA:GBPJPY,OANDA:NAS100USD,OANDA:US30USD' }}
           TF: ${{ matrix.tf }}
           RUN_MINUTES: "350"
