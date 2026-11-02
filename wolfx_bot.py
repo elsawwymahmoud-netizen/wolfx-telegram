@@ -1,45 +1,46 @@
 """
-WOLF X -> Telegram (free, runs 24/7 on GitHub Actions)
+WOLF X -> Telegram (runs 24/7 on GitHub Actions)
 
-Loads the ORIGINAL "Wolf X" script (Random_Thoughts123) on TradingView's public
-widget data feed (OANDA prices, same as the JIFU scanner), watches every symbol
-live, and when a candle closes with a Wolf X Buy/Sell arrow it sends:
-Entry (close), Invalid (20-bar low/high), TP1/TP2/TP3 (1R / 3R / 5R).
+Loads the ORIGINAL "Wolf X" script on TradingView (OANDA prices) and, when a candle
+closes with a Wolf X Buy/Sell arrow, posts "BUY/SELL — Check <symbol> — <tf>" to Telegram.
 
-Env vars: TG_TOKEN, TG_CHAT  (set as GitHub secrets)
-Optional: SYMBOLS="OANDA:XAUUSD,OANDA:EURUSD"  TF="15"  RUN_MINUTES="350"
+Env (GitHub secrets): TG_TOKEN, TG_CHAT, optional TG_ADMIN (gets health warnings)
+TradingView login (needed since TradingView blocked scripts on the anonymous feed):
+  TV_SESSION       = value of the "sessionid" cookie of the bot's TradingView account
+  TV_SESSION_SIGN  = value of the "sessionid_sign" cookie
+Optional: SYMBOLS, TF, RUN_MINUTES
 """
-import json, os, random, string, time, urllib.request, urllib.parse, re, traceback
+import json, os, random, string, time, urllib.request, urllib.parse, re, traceback, threading
 
 import websocket  # pip install websocket-client
 
 PINE_ID = "PUB;862506c546514212b9728a634dbc7152"
-WS_URL = "wss://widgetdata.tradingview.com/socket.io/websocket?from=embed"
-HEADERS = ["Origin: https://s.tradingview.com", "User-Agent: Mozilla/5.0"]
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 
 _tok = re.search(r"\d{6,}:[A-Za-z0-9_-]{30,}", os.environ.get("TG_TOKEN", ""))
 TG_TOKEN = _tok.group(0) if _tok else ""
 TG_CHAT = os.environ.get("TG_CHAT", "").strip()
+TG_ADMIN = os.environ.get("TG_ADMIN", "").strip()
+TV_SESSION = os.environ.get("TV_SESSION", "").strip()
+TV_SESSION_SIGN = os.environ.get("TV_SESSION_SIGN", "").strip()
 SYMBOLS = [s.strip() for s in os.environ.get(
     "SYMBOLS", "OANDA:XAUUSD,OANDA:EURUSD,OANDA:GBPUSD,OANDA:USDJPY").split(",") if s.strip()]
 TF = os.environ.get("TF", "15").strip()
 RUN_SECONDS = int(float(os.environ.get("RUN_MINUTES", "350")) * 60)
-SWING = 20
-RR = (1.0, 3.0, 5.0)
 TEST = os.environ.get("SEND_TEST", "") == "1"
-
 BIG = 1e10
+NICE = {"XAUUSD": "GOLD", "NAS100USD": "NAS100", "US30USD": "US30"}
 
 
 def log(*a):
     print(time.strftime("%Y-%m-%d %H:%M:%S"), *a, flush=True)
 
 
-def telegram(text):
-    if not TG_TOKEN or not TG_CHAT:
+def send(chats, text):
+    if not TG_TOKEN or not chats:
         log("TELEGRAM (not configured):", text)
         return
-    for chat in [c.strip() for c in TG_CHAT.split(",") if c.strip()]:
+    for chat in [c.strip() for c in chats.split(",") if c.strip()]:
         data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
         try:
             urllib.request.urlopen("https://api.telegram.org/bot%s/sendMessage" % TG_TOKEN, data, timeout=20).read()
@@ -47,13 +48,43 @@ def telegram(text):
             log("telegram error", chat, e)
 
 
-def http_json(url):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Origin": "https://s.tradingview.com"})
-    return json.loads(urllib.request.urlopen(req, timeout=30).read().decode())
+def telegram(text):
+    send(TG_CHAT, text)
+
+
+_warned = set()
+
+
+def admin(key, text):
+    log("ADMIN:", text)
+    if TG_ADMIN and key not in _warned:
+        _warned.add(key)
+        send(TG_ADMIN, "⚠️ WOLF X bot (" + TF + "m): " + text)
+
+
+def http(url, cookie=None):
+    h = {"User-Agent": UA, "Origin": "https://www.tradingview.com"}
+    if cookie:
+        h["Cookie"] = cookie
+    return urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=30).read().decode()
+
+
+def get_auth():
+    """Return (ws_url, origin, auth_token)."""
+    if TV_SESSION:
+        cookie = "sessionid=%s; sessionid_sign=%s" % (TV_SESSION, TV_SESSION_SIGN)
+        page = http("https://www.tradingview.com/chart/", cookie)
+        m = re.search(r'"auth_token":"([^"]+)"', page)
+        if m:
+            return "wss://data.tradingview.com/socket.io/websocket?type=chart", "https://www.tradingview.com", m.group(1)
+        admin("login", "TradingView login failed — the TV_SESSION cookie is wrong or expired. Copy it again.")
+    return ("wss://widgetdata.tradingview.com/socket.io/websocket?from=embed", "https://s.tradingview.com",
+            "widget_user_token")
 
 
 def load_script():
-    r = http_json("https://pine-facade.tradingview.com/pine-facade/translate/%s/last" % urllib.parse.quote(PINE_ID, safe=""))
+    r = json.loads(http("https://pine-facade.tradingview.com/pine-facade/translate/%s/last"
+                        % urllib.parse.quote(PINE_ID, safe="")))
     res = r["result"]
     mi = res["metaInfo"]
     il = res.get("ilTemplate") or next(i["defval"] for i in mi["inputs"] if i["id"] == "text")
@@ -61,11 +92,11 @@ def load_script():
     for i in mi["inputs"]:
         if i["id"] in ("text", "pineId", "pineVersion"):
             continue
-        inputs[i["id"]] = {"v": i["defval"], "f": bool(i.get("isFake")), "t": i["type"]}
+        inputs[i["id"]] = {"v": i["defval"], "f": True, "t": i["type"]}
+    inputs["__fast_calc"] = {"v": False, "f": True, "t": "bool"}
+    inputs["__profile"] = {"v": False, "f": True, "t": "bool"}
     titles = [mi["styles"].get(p["id"], {}).get("title") for p in mi["plots"]]
-    bi = titles.index("Buy Arrow") + 1   # +1 because v[0] is time
-    si = titles.index("Sell Arrow") + 1
-    return inputs, bi, si
+    return inputs, titles.index("Buy Arrow") + 1, titles.index("Sell Arrow") + 1
 
 
 def enc(m, p):
@@ -93,38 +124,28 @@ def rid(p):
 class Sym:
     def __init__(self, ticker):
         self.ticker = ticker
-        self.cs = rid("cs_")
-        self.bars = {}     # idx -> [t,o,h,l,c]
-        self.study = {}    # idx -> v
-        self.decimals = 5
-        self.last_checked_t = None  # time of the last closed bar we evaluated
-        self.started = False
+        self.bars, self.study = {}, {}
+        self.last_checked_t = None
 
     def short(self):
         return self.ticker.split(":")[-1]
 
 
-def fmt(v, d):
-    return ("%." + str(d) + "f") % v
-
-
-def check_closed(sym, bi, si, start_time):
-    """Evaluate every bar that has closed since last check."""
-    if len(sym.bars) < SWING + 2:
+def check_closed(sym, bi, si):
+    if len(sym.bars) < 22:
         return
-    idxs = sorted(sym.bars)
-    closed = idxs[:-1]  # last bar is still forming
+    closed = sorted(sym.bars)[:-1]  # last bar is still forming
     last_closed_t = sym.bars[closed[-1]][0]
     if sym.last_checked_t is None:
-        # first data: only alert on a bar that closed within the last 3 minutes
-        sym.last_checked_t = last_closed_t - 1 if time.time() - (last_closed_t + int(TF) * 60) < 180 else last_closed_t
-    for k, idx in enumerate(closed):
+        recent = time.time() - (last_closed_t + int(TF) * 60) < 180
+        sym.last_checked_t = last_closed_t - 1 if recent else last_closed_t
+    for idx in closed:
         b = sym.bars[idx]
         if b[0] <= sym.last_checked_t:
             continue
         sv = sym.study.get(idx)
         if sv is None:
-            return  # study not updated yet; try again on next message
+            return
         buy = sv[bi] if len(sv) > bi else None
         sell = sv[si] if len(sv) > si else None
         d = 0
@@ -133,89 +154,75 @@ def check_closed(sym, bi, si, start_time):
         elif sell is not None and abs(sell) < BIG and sell != 0:
             d = -1
         sym.last_checked_t = b[0]
-        if d == 0:
-            continue
-        window = [sym.bars[j] for j in closed[max(0, k - SWING + 1):k + 1]]
-        entry = b[4]
-        sl = min(x[3] for x in window) if d == 1 else max(x[2] for x in window)
-        risk = abs(entry - sl)
-        tps = [entry + d * risk * r for r in RR]
-        dec = sym.decimals
-        when = time.strftime("%Y-%m-%d %H:%M", time.gmtime(b[0] + int(TF) * 60 + 3 * 3600))
-        nice = {"XAUUSD": "GOLD", "NAS100USD": "NAS100", "US30USD": "US30"}.get(sym.short(), sym.short())
-        msg = ("🟢 BUY" if d == 1 else "🔴 SELL") + " — Check " + nice + " — " + TF + "m"
-        log("SIGNAL", msg)
-        telegram(msg)
+        if d:
+            msg = ("🟢 BUY" if d == 1 else "🔴 SELL") + " — Check " + NICE.get(sym.short(), sym.short()) + " — " + TF + "m"
+            log("SIGNAL", msg)
+            telegram(msg)
 
 
-def run_once(inputs, bi, si, deadline, syms):
-    ws = websocket.create_connection(WS_URL, header=HEADERS, timeout=60)
-    ws.send(enc("set_auth_token", ["widget_user_token"]))
-    retry = {}  # cs -> time to re-create the study
-    for s in syms:
-        s.bars.clear(); s.study.clear(); s.st_n = 1
-        ws.send(enc("chart_create_session", [s.cs, ""]))
-        ws.send(enc("resolve_symbol", [s.cs, "sds_sym_1", '={"symbol":"%s","adjustment":"splits"}' % s.ticker]))
-        ws.send(enc("create_series", [s.cs, "sds_1", "s1", "sds_sym_1", TF, 300, ""]))
-        retry[s.cs] = time.time() + 2 + 6 * len(retry)  # stagger study creation
-    by_cs = {s.cs: s for s in syms}
-    start = time.time()
+def watch(sym, inputs, bi, si, deadline):
+    """One websocket per symbol, reconnecting until the deadline."""
     while time.time() < deadline:
-        now = time.time()
-        for cs, at in list(retry.items()):
-            if now >= at:
-                s = by_cs[cs]
-                sid = "st%d" % s.st_n
-                ws.send(enc("create_study", [cs, sid, sid, "sds_1", "Script@tv-scripting-101!", inputs]))
-                del retry[cs]
-        raw = ws.recv()
-        for fr in split_frames(raw):
-            if fr.startswith("~h~"):
-                ws.send("~m~%d~m~%s" % (len(fr), fr))
-                continue
-            if not fr.startswith("{"):
-                continue
-            msg = json.loads(fr)
-            m, p = msg.get("m"), msg.get("p", [])
-            if not p or p[0] not in by_cs:
-                continue
-            s = by_cs[p[0]]
-            if m == "symbol_resolved":
-                ps = p[2].get("pricescale", 100000)
-                s.decimals = max(0, len(str(int(ps))) - 1)
-            elif m in ("timescale_update", "du"):
-                data = p[1]
-                for row in data.get("sds_1", {}).get("s", []):
-                    s.bars[row["i"]] = row["v"][:5]
-                for row in data.get("st%d" % s.st_n, {}).get("st", []):
-                    s.study[row["i"]] = row["v"]
-                check_closed(s, bi, si, start)
-            elif m == "study_error":
-                log("study error, retrying", s.ticker, json.dumps(p)[:200])
-                ws.send(enc("remove_study", [s.cs, "st%d" % s.st_n]))
-                s.st_n += 1
-                s.study.clear()
-                retry[s.cs] = time.time() + 15
-            elif m in ("symbol_error", "series_error", "critical_error", "protocol_error"):
-                log("ERROR", s.ticker, json.dumps(p)[:300])
-    ws.close()
+        try:
+            url, origin, token = get_auth()
+            ws = websocket.create_connection(url, header=["Origin: " + origin, "User-Agent: " + UA], timeout=60)
+            cs = rid("cs_")
+            sym.bars.clear(); sym.study.clear()
+            ws.send(enc("set_auth_token", [token]))
+            ws.send(enc("chart_create_session", [cs, ""]))
+            ws.send(enc("resolve_symbol", [cs, "sds_sym_1", '={"symbol":"%s","adjustment":"splits"}' % sym.ticker]))
+            ws.send(enc("create_series", [cs, "sds_1", "s1", "sds_sym_1", TF, 300, ""]))
+            time.sleep(2)
+            ws.send(enc("create_study", [cs, "st1", "st1", "sds_1", "Script@tv-scripting-101!", inputs]))
+            started, got = time.time(), False
+            while time.time() < deadline:
+                raw = ws.recv()
+                for fr in split_frames(raw):
+                    if fr.startswith("~h~"):
+                        ws.send("~m~%d~m~%s" % (len(fr), fr))
+                        continue
+                    if not fr.startswith("{"):
+                        continue
+                    msg = json.loads(fr)
+                    m, p = msg.get("m"), msg.get("p", [])
+                    if m in ("timescale_update", "du"):
+                        data = p[1]
+                        for row in data.get("sds_1", {}).get("s", []):
+                            sym.bars[row["i"]] = row["v"][:5]
+                        rows = data.get("st1", {}).get("st", [])
+                        for row in rows:
+                            sym.study[row["i"]] = row["v"]
+                        if rows and not got:
+                            got = True
+                            log("study data OK", sym.ticker)
+                        check_closed(sym, bi, si)
+                    elif m in ("study_error", "symbol_error", "series_error", "critical_error", "protocol_error"):
+                        log("ERROR", sym.ticker, m, json.dumps(p)[:300])
+                        admin(m + sym.ticker, sym.short() + ": " + json.dumps(p)[:200])
+                        raise RuntimeError(m)
+                if not got and time.time() - started > 120:
+                    admin("nodata", "TradingView is not returning Wolf X data (" + sym.short() + ").")
+                    raise RuntimeError("no study data")
+            ws.close()
+        except Exception as e:
+            log("reconnect", sym.ticker, repr(e)[:200])
+            time.sleep(30)
 
 
 def main():
     inputs, bi, si = load_script()
-    log("Wolf X loaded. symbols:", SYMBOLS, "tf:", TF)
+    log("Wolf X loaded. symbols:", SYMBOLS, "tf:", TF, "login:", "yes" if TV_SESSION else "no")
     if TEST:
-        telegram("✅ WOLF X bot is running: " + ", ".join(x.split(":")[-1] for x in SYMBOLS) + " (" + TF + "m)")
+        send(TG_ADMIN or TG_CHAT, "✅ WOLF X bot is running (" + TF + "m)")
     deadline = time.time() + RUN_SECONDS
-    syms = [Sym(t) for t in SYMBOLS]
-    while time.time() < deadline:
-        try:
-            run_once(inputs, bi, si, deadline, syms)
-        except Exception:
-            log("connection error, reconnecting in 10s\n" + traceback.format_exc())
-            time.sleep(10)
-            for s in syms:
-                s.cs = rid("cs_")
+    threads = []
+    for k, t in enumerate(SYMBOLS):
+        th = threading.Thread(target=watch, args=(Sym(t), inputs, bi, si, deadline), daemon=True)
+        th.start()
+        threads.append(th)
+        time.sleep(3)
+    for th in threads:
+        th.join()
     log("run finished")
 
 
