@@ -198,22 +198,29 @@ def check_closed(sym, bi, si):
             telegram(msg)
 
 
-def watch(sym, inputs, bi, si, deadline):
-    """One websocket per symbol, reconnecting until the deadline."""
+def watch_all(syms, inputs, bi, si, deadline):
+    """One websocket for all symbols (TradingView limits connections per account)."""
     while time.time() < deadline:
         try:
             url, origin, token = get_auth()
             ws = websocket.create_connection(url, header=["Origin: " + origin, "User-Agent: " + UA], timeout=60)
-            cs = rid("cs_")
-            sym.bars.clear(); sym.study.clear()
             ws.send(enc("set_auth_token", [token]))
-            ws.send(enc("chart_create_session", [cs, ""]))
-            ws.send(enc("resolve_symbol", [cs, "sds_sym_1", '={"symbol":"%s","adjustment":"splits"}' % sym.ticker]))
-            ws.send(enc("create_series", [cs, "sds_1", "s1", "sds_sym_1", TF, 300, ""]))
-            time.sleep(2)
-            ws.send(enc("create_study", [cs, "st1", "st1", "sds_1", "Script@tv-scripting-101!", inputs]))
-            started, got = time.time(), False
+            by_cs, retry = {}, {}
+            for k, sym in enumerate(syms):
+                sym.cs = rid("cs_")
+                sym.bars.clear(); sym.study.clear(); sym.got = False
+                by_cs[sym.cs] = sym
+                ws.send(enc("chart_create_session", [sym.cs, ""]))
+                ws.send(enc("resolve_symbol", [sym.cs, "sds_sym_1", '={"symbol":"%s","adjustment":"splits"}' % sym.ticker]))
+                ws.send(enc("create_series", [sym.cs, "sds_1", "s1", "sds_sym_1", TF, 300, ""]))
+                retry[sym.cs] = time.time() + 2 + 3 * k
+            started = time.time()
             while time.time() < deadline:
+                now = time.time()
+                for cs, at in list(retry.items()):
+                    if now >= at:
+                        ws.send(enc("create_study", [cs, "st1", "st1", "sds_1", "Script@tv-scripting-101!", inputs]))
+                        del retry[cs]
                 raw = ws.recv()
                 for fr in split_frames(raw):
                     if fr.startswith("~h~"):
@@ -223,6 +230,12 @@ def watch(sym, inputs, bi, si, deadline):
                         continue
                     msg = json.loads(fr)
                     m, p = msg.get("m"), msg.get("p", [])
+                    if m == "protocol_error" or m == "critical_error":
+                        admin(m, json.dumps(p)[:200])
+                        raise RuntimeError(m + " " + json.dumps(p)[:100])
+                    if not p or p[0] not in by_cs:
+                        continue
+                    sym = by_cs[p[0]]
                     if m in ("timescale_update", "du"):
                         data = p[1]
                         for row in data.get("sds_1", {}).get("s", []):
@@ -230,21 +243,27 @@ def watch(sym, inputs, bi, si, deadline):
                         rows = data.get("st1", {}).get("st", [])
                         for row in rows:
                             sym.study[row["i"]] = row["v"]
-                        if rows and not got:
-                            got = True
+                        if rows and not sym.got:
+                            sym.got = True
                             log("study data OK", sym.ticker)
                         check_closed(sym, bi, si)
-                    elif m in ("study_error", "symbol_error", "series_error", "critical_error", "protocol_error"):
+                    elif m in ("study_error", "symbol_error", "series_error"):
                         log("ERROR", sym.ticker, m, json.dumps(p)[:300])
                         admin(m + sym.ticker, sym.short() + ": " + json.dumps(p)[:200])
-                        raise RuntimeError(m)
-                if not got and time.time() - started > 120:
-                    admin("nodata", "TradingView is not returning Wolf X data (" + sym.short() + ").")
-                    raise RuntimeError("no study data")
+                        if m == "study_error":
+                            ws.send(enc("remove_study", [sym.cs, "st1"]))
+                            retry[sym.cs] = time.time() + 60
+                if time.time() - started > 150:
+                    missing = [x.short() for x in syms if not x.got]
+                    if len(missing) == len(syms):
+                        admin("nodata", "TradingView is not returning Wolf X data.")
+                        raise RuntimeError("no study data")
+                    if missing and "partial" not in _warned:
+                        admin("partial", "no Wolf X data for: " + ", ".join(missing))
             ws.close()
         except Exception as e:
-            log("reconnect", sym.ticker, repr(e)[:200])
-            time.sleep(30)
+            log("reconnect", repr(e)[:200])
+            time.sleep(60)
 
 
 def main():
@@ -253,14 +272,7 @@ def main():
     if TEST:
         send(TG_ADMIN or TG_CHAT, "✅ WOLF X bot is running (" + TF + "m)")
     deadline = time.time() + RUN_SECONDS
-    threads = []
-    for k, t in enumerate(SYMBOLS):
-        th = threading.Thread(target=watch, args=(Sym(t), inputs, bi, si, deadline), daemon=True)
-        th.start()
-        threads.append(th)
-        time.sleep(3)
-    for th in threads:
-        th.join()
+    watch_all([Sym(t) for t in SYMBOLS], inputs, bi, si, deadline)
     log("run finished")
 
 
