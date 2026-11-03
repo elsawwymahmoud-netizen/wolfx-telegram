@@ -114,6 +114,13 @@ def get_auth():
     if cookie:
         page = http("https://www.tradingview.com/chart/", cookie)
         m = re.search(r'"auth_token":"([^"]+)"', page)
+        u = re.search(r'"username":"([^"]+)"', page)
+        pro = re.search(r'"pro_plan":"([^"]*)"', page)
+        log("AUTH user:", u.group(1) if u else None, "plan:", pro.group(1) if pro else None,
+            "token:", (m.group(1)[:12] + "...") if m else None, "page bytes:", len(page))
+        if m and m.group(1).startswith("unauthorized"):
+            admin("unauth", "TradingView did not accept the login cookies (logged-out page).")
+            m = None
         if m:
             return "wss://data.tradingview.com/socket.io/websocket?type=chart", "https://www.tradingview.com", m.group(1)
         _cookie["v"] = ""
