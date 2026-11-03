@@ -131,12 +131,23 @@ def get_auth():
 
 def load_script():
     ck = ("sessionid=%s; sessionid_sign=%s" % (TV_SESSION, TV_SESSION_SIGN)) if TV_SESSION else None
-    r = json.loads(http("https://pine-facade.tradingview.com/pine-facade/translate/%s/last"
-                        % urllib.parse.quote(PINE_ID, safe=""), ck))
-    res = r["result"]
-    mi = res["metaInfo"]
-    il = res.get("ilTemplate") or next(i["defval"] for i in mi["inputs"] if i["id"] == "text")
-    log("IL", len(il), il[:16])
+    base = "https://pine-facade.tradingview.com/pine-facade/translate/%s/last" % urllib.parse.quote(PINE_ID, safe="")
+    user = TV_USER or "sawy1"
+    best = None
+    for q, c in (("?user_name=" + user, ck), ("?user_name=" + user, None), ("", ck), ("", None)):
+        try:
+            res = json.loads(http(base + q, c))["result"]
+        except Exception as e:
+            log("translate error", q, bool(c), repr(e)[:120])
+            continue
+        mi = res["metaInfo"]
+        il = res.get("ilTemplate") or next((i.get("defval") or "" for i in mi["inputs"] if i["id"] == "text"), "")
+        log("IL", q, "cookie" if c else "nocookie", len(il), il[:10])
+        if il:
+            best = (res, mi, il)
+            break
+        best = best or (res, mi, il)
+    res, mi, il = best
     inputs = {"text": il, "pineId": mi["scriptIdPart"], "pineVersion": mi["pine"]["version"]}
     for i in mi["inputs"]:
         if i["id"] in ("text", "pineId", "pineVersion"):
