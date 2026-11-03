@@ -230,6 +230,8 @@ def watch_all(syms, inputs, bi, si, deadline):
                         continue
                     msg = json.loads(fr)
                     m, p = msg.get("m"), msg.get("p", [])
+                    if time.time() - started < 200 and m not in ("du", "timescale_update"):
+                        log("WS", m, json.dumps(p)[:160])
                     if m == "protocol_error" or m == "critical_error":
                         admin(m, json.dumps(p)[:200])
                         raise RuntimeError(m + " " + json.dumps(p)[:100])
