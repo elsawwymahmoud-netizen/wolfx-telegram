@@ -25,7 +25,8 @@ TV_SESSION = os.environ.get("TV_SESSION", "").strip()
 TV_SESSION_SIGN = os.environ.get("TV_SESSION_SIGN", "").strip()
 SYMBOLS = [s.strip() for s in os.environ.get(
     "SYMBOLS", "OANDA:XAUUSD,OANDA:EURUSD,OANDA:GBPUSD,OANDA:USDJPY").split(",") if s.strip()]
-TF = os.environ.get("TF", "15").strip()
+TFS = [t.strip() for t in os.environ.get("TF", "1,5").split(",") if t.strip()]
+TF = ",".join(TFS)
 RUN_SECONDS = int(float(os.environ.get("RUN_MINUTES", "350")) * 60)
 TEST = os.environ.get("SEND_TEST", "") == "1"
 BIG = 1e10
@@ -53,13 +54,14 @@ def telegram(text):
 
 
 _warned = set()
+_dbg = {"n": 0}
 
 
 def admin(key, text):
     log("ADMIN:", text)
     if TG_ADMIN and key not in _warned:
         _warned.add(key)
-        send(TG_ADMIN, "⚠️ WOLF X bot (" + TF + "m): " + text)
+        send(TG_ADMIN, "⚠️ WOLF X bot: " + text)
 
 
 def http(url, cookie=None):
@@ -160,8 +162,9 @@ def rid(p):
 
 
 class Sym:
-    def __init__(self, ticker):
+    def __init__(self, ticker, tf):
         self.ticker = ticker
+        self.tf = tf
         self.bars, self.study = {}, {}
         self.last_checked_t = None
 
@@ -175,7 +178,7 @@ def check_closed(sym, bi, si):
     closed = sorted(sym.bars)[:-1]  # last bar is still forming
     last_closed_t = sym.bars[closed[-1]][0]
     if sym.last_checked_t is None:
-        recent = time.time() - (last_closed_t + int(TF) * 60) < 180
+        recent = time.time() - (last_closed_t + int(sym.tf) * 60) < 180
         sym.last_checked_t = last_closed_t - 1 if recent else last_closed_t
     for idx in closed:
         b = sym.bars[idx]
@@ -193,7 +196,7 @@ def check_closed(sym, bi, si):
             d = -1
         sym.last_checked_t = b[0]
         if d:
-            msg = ("🟢 BUY" if d == 1 else "🔴 SELL") + " — Check " + NICE.get(sym.short(), sym.short()) + " — " + TF + "m"
+            msg = ("🟢 BUY" if d == 1 else "🔴 SELL") + " — Check " + NICE.get(sym.short(), sym.short()) + " — " + sym.tf + "m"
             log("SIGNAL", msg)
             telegram(msg)
 
@@ -212,9 +215,10 @@ def watch_all(syms, inputs, bi, si, deadline):
                 by_cs[sym.cs] = sym
                 ws.send(enc("chart_create_session", [sym.cs, ""]))
                 ws.send(enc("resolve_symbol", [sym.cs, "sds_sym_1", '={"symbol":"%s","adjustment":"splits"}' % sym.ticker]))
-                ws.send(enc("create_series", [sym.cs, "sds_1", "s1", "sds_sym_1", TF, 300, ""]))
-                retry[sym.cs] = time.time() + 2 + 3 * k
+                ws.send(enc("create_series", [sym.cs, "sds_1", "s1", "sds_sym_1", sym.tf, 300, ""]))
+                retry[sym.cs] = time.time() + 2 + 2 * k
             started = time.time()
+            last_status = started - 450
             while time.time() < deadline:
                 now = time.time()
                 for cs, at in list(retry.items()):
@@ -235,19 +239,29 @@ def watch_all(syms, inputs, bi, si, deadline):
                     if m == "protocol_error" or m == "critical_error":
                         admin(m, json.dumps(p)[:200])
                         raise RuntimeError(m + " " + json.dumps(p)[:100])
-                    if not p or p[0] not in by_cs:
+                    if m == "notify_user":
+                        admin("notify", "TradingView: " + json.dumps(p)[:200]
+                              + " (close the TradingView tabs of the bot account in your browser)")
+                        continue
+                    if not p or not isinstance(p[0], str) or p[0] not in by_cs:
                         continue
                     sym = by_cs[p[0]]
                     if m in ("timescale_update", "du"):
                         data = p[1]
+                        if _dbg["n"] < 12:
+                            _dbg["n"] += 1
+                            log("KEYS", m, sym.ticker, sym.tf, list(data.keys()))
                         for row in data.get("sds_1", {}).get("s", []):
                             sym.bars[row["i"]] = row["v"][:5]
+                        if "st1" in data and not getattr(sym, "dbg", False):
+                            sym.dbg = True
+                            log("DBG", sym.ticker, sym.tf, json.dumps(data["st1"])[:400])
                         rows = data.get("st1", {}).get("st", [])
                         for row in rows:
                             sym.study[row["i"]] = row["v"]
                         if rows and not sym.got:
                             sym.got = True
-                            log("study data OK", sym.ticker)
+                            log("study data OK", sym.ticker, sym.tf)
                         check_closed(sym, bi, si)
                     elif m in ("study_error", "symbol_error", "series_error"):
                         log("ERROR", sym.ticker, m, json.dumps(p)[:300])
@@ -255,8 +269,11 @@ def watch_all(syms, inputs, bi, si, deadline):
                         if m == "study_error":
                             ws.send(enc("remove_study", [sym.cs, "st1"]))
                             retry[sym.cs] = time.time() + 60
+                if time.time() - last_status > 600:
+                    last_status = time.time()
+                    log("STATUS", " ".join("%s/%s:%d/%d" % (x.short(), x.tf, len(x.bars), len(x.study)) for x in syms))
                 if time.time() - started > 150:
-                    missing = [x.short() for x in syms if not x.got]
+                    missing = [x.short() + "/" + x.tf for x in syms if not x.got]
                     if len(missing) == len(syms):
                         admin("nodata", "TradingView is not returning Wolf X data.")
                         raise RuntimeError("no study data")
@@ -272,9 +289,9 @@ def main():
     inputs, bi, si = load_script()
     log("Wolf X loaded. symbols:", SYMBOLS, "tf:", TF, "login:", "cookie" if TV_SESSION else ("password" if TV_USER else "no"))
     if TEST:
-        send(TG_ADMIN or TG_CHAT, "✅ WOLF X bot is running (" + TF + "m)")
+        send(TG_ADMIN or TG_CHAT, "✅ WOLF X bot is running (" + TF + ")")
     deadline = time.time() + RUN_SECONDS
-    watch_all([Sym(t) for t in SYMBOLS], inputs, bi, si, deadline)
+    watch_all([Sym(t, tf) for tf in TFS for t in SYMBOLS], inputs, bi, si, deadline)
     log("run finished")
 
 
