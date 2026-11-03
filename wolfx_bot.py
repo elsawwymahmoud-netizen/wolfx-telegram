@@ -130,11 +130,13 @@ def get_auth():
 
 
 def load_script():
+    ck = ("sessionid=%s; sessionid_sign=%s" % (TV_SESSION, TV_SESSION_SIGN)) if TV_SESSION else None
     r = json.loads(http("https://pine-facade.tradingview.com/pine-facade/translate/%s/last"
-                        % urllib.parse.quote(PINE_ID, safe="")))
+                        % urllib.parse.quote(PINE_ID, safe=""), ck))
     res = r["result"]
     mi = res["metaInfo"]
     il = res.get("ilTemplate") or next(i["defval"] for i in mi["inputs"] if i["id"] == "text")
+    log("IL", len(il), il[:16])
     inputs = {"text": il, "pineId": mi["scriptIdPart"], "pineVersion": mi["pine"]["version"]}
     for i in mi["inputs"]:
         if i["id"] in ("text", "pineId", "pineVersion"):
